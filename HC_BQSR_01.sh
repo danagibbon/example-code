@@ -6,6 +6,7 @@
 ## BQSR: round 1
 ### variant calling: g.vcf, joint genotyping, separate SNPs and Indels- filter
 ### Run BQSR round 1 and 2, plot comparison
+### *loops were run separtely
 
 # Tools
 GATK="/n/local/stage/gatk/GenomeAnalysisTK-3.8-0-ge9d806836/GenomeAnalysisTK.jar"
