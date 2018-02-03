@@ -1,0 +1,868 @@
+---
+title: "Time Course Analysis: Compare EdgeR to maSigPro"
+author: "Dana Gibbon"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    collapsed: true
+    toc_depth: 3
+    code_folding: show
+    theme: sandstone
+    number_sections: false
+    highlight: zenburn
+---
+
+
+```{r setup, echo=FALSE, message=FALSE, results='markup'}
+library(knitr)
+library(pander)
+opts_chunk$set(echo = TRUE, message = TRUE, results = 'markup', warning = FALSE)
+
+library(biomaRt)
+library(ggplot2)
+library(pheatmap)
+library(edgeR)
+library(reshape)
+library(DT)
+library(maSigPro)
+library(Mfuzz)
+library(Biobase)
+library(here)
+
+library(Rsamtools)
+library(rtracklayer)
+library(GenomicFeatures)
+library(GenomicAlignments)
+library(GenomicRanges)
+
+
+```
+
+# Background
+
+## Purpose
+
+* compare EdgeR differential expression results to the time course specific maSigPro package
+* Determine how using 0 dpa and amputated changes DE
+* compare clustering methods
+
+## Experimental Design
+
+| Sample Name | Time point | Description | Replicates | 
+|:-----------|:----------------|:----------------------|:----|
+| time_0 | time_0 days post amputation | tissue close to wounding site on the fin (right after amputation)|3|
+| time_1 | time_1 hours post amputation | tissue, posterior, to wounding site on the fin | 3 |
+| time_2 | time_2 hours post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_3 | time_3 hours post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_4 | time_4 days post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_5 | time_5 days post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_6 | time_6 days post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_7 | time_7 days post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_8 | time_8 days post amputation | tissue, posterior, to wounding site on the fin  | 3 |
+| time_9 | time_9 days post amputation | tissue close to wounding site on the fin | 3 |
+| Posterior | N/A | tissue at most posterior point of the fin | 3 |
+| Amputated | N/A | Amputated fin tissue (right after amputation) | 3 |
+
+
+# Fin Regeneration Time Course {.tabset .tabset-fade}
+
+## EdgeR {.tabset .tabset-fade}
+
+* Read in counts table 
+* Load txdb
+
+```{r}
+# Read in count tables 
+counts.1249 <- readRDS(here("data","counts","MOLNG_1249_counts.RDS"))
+counts.1332 <- readRDS(here("data","counts","MOLNG_1332_counts.RDS"))
+# combine counts tables and reorder 
+counts.combined <- cbind(counts.1249,counts.1332)
+counts.combined <- counts.combined[,c(22:24,1:3,43:45,16:18,40:42,4:15,19:21,37:39,25:36)] 
+colnames(counts.combined) <- c(paste("Amputated_R",1:3,sep=''),paste("time_0_R",1:3,sep=''),paste("time_1_R",1:3,sep=''),
+                               paste("time_2_R",1:3,sep=''),paste("time_3_R",1:3,sep=''),paste("time_4_R",1:3,sep=''),
+                               paste("time_5_R",1:3,sep=''),paste("time_6_R",1:3,sep=''),paste("time_7_R",1:3,sep='')
+                               ,paste("time_8_R",1:3,sep=''),paste("time_9_R",1:3,sep=''),colnames(counts.combined)[34:45])
+
+
+# Get group info/samples names for targets 
+s.names <- colnames(counts.combined)
+targets <- data.frame(s.names,c(rep("Amputated",3),rep("time_0",3),rep("time_1",3),rep("time_2",3),
+                                rep("time_3",3),rep("time_4",3),rep("time_5",3),
+                                rep("time_6",3),rep("time_7",3),rep("time_8",3),rep("time_9",3),
+                                rep("Forebrain",3),rep("Hindbrain",3),
+                                rep("Midbrain",3),rep("Posterior",3)))
+colnames(targets) <- c("sample.name","group")
+
+# functions
+minpositive <- function(x)min(x[x > 0])
+maxnegative <- function(x)max(x[x < 0])
+
+```
+
+
+### Compared to time 0
+
+* Find differentially expressed genes using EdgeR
+    + exactTest was used to determine differentially expressed genes between each time point compared to time 0
+    + adjusted p-values were calculated using Benjamini & Hochberg (BH)
+* Time 0 was used as the control
+
+```{r}
+# select samples needed for this comparison (all time points)
+counts.0 <- counts.combined[,c(4:6,1:3,7:33)] 
+targets.0 <- targets[c(4:6,1:3,7:33),]
+# make the data frame to edgeR formate DGEList
+z <- DGEList(counts=counts.0, group=targets.0$group)
+# filtering
+keep <- rowSums(cpm(z)>3) >= 3
+table(keep)
+z <- z[keep, ,  keep.lib.sizes=FALSE]
+
+#normalizes for RNA composition by finding a set of scaling
+#factors for the library sizes that minimize the log-fold changes between the samples for most genes. 
+# TMM normalization 
+z <- calcNormFactors(z)
+
+### Estimating Dispersions
+#see page 18 of user guide for explanation of qCML
+#estimate the qCML common dispersion
+z <- estimateCommonDisp(z)
+#qCML tagwise dispersions
+z <- estimateTagwiseDisp(z)
+
+# exactTest 
+# Compute genewise exact tests for differences in the mean between two groups of negative-binomially distributed counts
+un.group <- unique(as.character(targets.0$group))
+pair <- list(c(un.group[1],un.group[2]),c(un.group[1],un.group[3]),c(un.group[1],un.group[4]),
+              c(un.group[1],un.group[5]),c(un.group[1],un.group[6]),c(un.group[1],un.group[7]),
+              c(un.group[1],un.group[8]),c(un.group[1],un.group[9]),c(un.group[1],un.group[10]),
+             c(un.group[1],un.group[11]))
+# run exactTest 
+res.0 <- lapply(pair, function(x){
+  exactTest(z,pair = x)
+  })
+# adjust p-value via Benjamini & Hochberg (aka FDR)
+res.0 <- lapply(res.0, function(x){ within(x$table, {
+    padj = p.adjust(x$table$PValue,method="BH")})
+  })
+
+
+
+```
+
+#### MA plots {.tabset .tabset-fade}
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+de.genes.0.l <- list()
+df.summary.0.l <- list()
+
+for(i in 1:length(res.0)){
+  cat("\n\n")
+  pandoc.header(paste(un.group[1]," vs. ", un.group[i+1], sep=''), level=5)
+  
+  padj.up <- res.0[[i]][(res.0[[i]]$padj < 0.01 & res.0[[i]]$logFC > log2(2)),]
+  padj.dn <- res.0[[i]][(res.0[[i]]$padj < 0.01 & res.0[[i]]$logFC < -log2(2)),]
+  de.genes.0.l[[i]] <- rbind(padj.up,padj.dn)
+  
+  df.summary.0.l[[i]] <- df.temp <-c(nrow(padj.up),round(minpositive(padj.up$logFC),3),
+                                 round(max(padj.up$logFC),3),
+                                 nrow(padj.dn),
+                                 round(maxnegative(padj.dn$logFC),3),
+                                 round(min(padj.dn$logFC),3))
+
+  p <- ggplot(data = res.0[[i]], aes(x=res.0[[i]]$logCPM, y=res.0[[i]]$logFC)) + 
+    theme_bw() + geom_point(size=1) + ylab("log2(FC)") + xlab("log2(CPM)") + 
+    geom_point(data = padj.up, aes(x=padj.up$logCPM,y=padj.up$logFC), color="red", size=1) + 
+    geom_point(data = padj.dn, aes(x=padj.dn$logCPM,y=padj.dn$logFC), color="blue", size=1) + 
+    labs(title=paste(un.group[1]," vs. ", un.group[i+1], ": pval < 0.01 & log2(FC) > log2(2)",sep=''))
+  print(p)
+}
+
+```
+
+####  Summary Table
+
+```{r, echo=TRUE}
+
+# Summary table
+df.summary.0 <- do.call("rbind",df.summary.0.l)
+colnames(df.summary.0) <- c("DE up","min +log2FC","max +log2FC","DE down","min -log2FC","max -log2FC")
+rownames(df.summary.0) <- paste(un.group[1],".vs.", un.group[2:11], sep='')
+names(de.genes.0.l) <- paste(un.group[1],".vs.", un.group[2:11], sep='')
+
+datatable(df.summary.0, extensions = 'Buttons',
+          options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+# Get list of genes that are DE in at least 1 comparison
+de.genes.names.0 <- do.call("c",lapply(de.genes.0.l, function(x){rownames(x)}))
+de.genes.names.0.u <- unique(de.genes.names.0)
+
+df.genes.0 <- do.call("cbind",lapply(res.0, function(x){x[rownames(x) %in% de.genes.names.0.u,]}))
+
+
+colnames(df.genes.0)<-c(paste(un.group[1],".vs.", un.group[2], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[3], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[4], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[5], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[6], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[7], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[8], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[9], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[10], "_", colnames(df.genes.0)[1:4], sep=''),
+                        paste(un.group[1],".vs.", un.group[11], "_", colnames(df.genes.0)[1:4], sep=''))
+
+```
+
+
+### Compared to Amputated
+
+* Find differentially expressed genes using EdgeR
+    + exactTest was used to determine differentially expressed genes between each time point compared to Amputated fin
+    + adjusted p-values were calculated using Benjamini & Hochberg (BH)
+* Amputated fin was used as the control
+
+```{r}
+# select samples needed for this comparison (all time points)
+counts.a <- counts.combined[,1:33]
+targets.a <- targets[1:33,]
+# make the data frame to edgeR formate DGEList
+z.a <- DGEList(counts=counts.a, group=targets.a$group)
+# filtering
+keep.a <- rowSums(cpm(z.a)>3) >= 3
+table(keep.a)
+z.a <- z.a[keep.a, ,  keep.lib.sizes=FALSE]
+
+#normalizes for RNA composition by finding a set of scaling
+#factors for the library sizes that minimize the log-fold changes between the samples for most genes. 
+# TMM normalization 
+z.a <- calcNormFactors(z.a)
+
+### Estimating Dispersions
+#see page 18 of user guide for explanation of qCML
+#estimate the qCML common dispersion
+z.a <- estimateCommonDisp(z.a)
+#qCML tagwise dispersions
+z.a <- estimateTagwiseDisp(z.a)
+
+# exactTest 
+# Compute genewise exact tests for differences in the mean between two groups of negative-binomially distributed counts
+un.group.a <- unique(as.character(targets.a$group))
+pair.a <- list(c(un.group.a[1],un.group.a[2]),c(un.group.a[1],un.group.a[3]),
+             c(un.group.a[1],un.group.a[4]),
+              c(un.group.a[1],un.group.a[5]),c(un.group.a[1],un.group.a[6]),
+             c(un.group.a[1],un.group.a[7]),
+              c(un.group.a[1],un.group.a[8]),c(un.group.a[1],un.group.a[9]),
+             c(un.group.a[1],un.group.a[10]),
+             c(un.group.a[1],un.group.a[11]))
+# run exactTest 
+res.a <- lapply(pair.a, function(x){
+  exactTest(z.a,pair = x)
+  })
+# adjust p-value via Benjamini & Hochberg (aka FDR)
+res.a <- lapply(res.a, function(x){ within(x$table, {
+    padj = p.adjust(x$table$PValue,method="BH")})
+  })
+
+
+
+```
+
+
+#### MA plots {.tabset .tabset-fade}
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+de.genes.a.l <- list()
+df.summary.a.l <- list()
+
+for(i in 1:length(res.a)){
+  cat("\n\n")
+  pandoc.header(paste(un.group.a[1]," vs. ", un.group.a[i+1], sep=''), level=5)
+  
+  padj.up <- res.a[[i]][(res.a[[i]]$padj < 0.01 & res.a[[i]]$logFC > log2(2)),]
+  padj.dn <- res.a[[i]][(res.a[[i]]$padj < 0.01 & res.a[[i]]$logFC < -log2(2)),]
+  de.genes.a.l[[i]] <- rbind(padj.up,padj.dn)
+  
+  df.summary.a.l[[i]] <- df.temp <-c(nrow(padj.up),round(minpositive(padj.up$logFC),3),
+                                 round(max(padj.up$logFC),3),
+                                 nrow(padj.dn),
+                                 round(maxnegative(padj.dn$logFC),3),
+                                 round(min(padj.dn$logFC),3))
+
+  p <- ggplot(data = res.a[[i]], aes(x=res.a[[i]]$logCPM, y=res.a[[i]]$logFC)) + 
+    theme_bw() + geom_point(size=1) + ylab("log2(FC)") + xlab("log2(CPM)") + 
+    geom_point(data = padj.up, aes(x=padj.up$logCPM,y=padj.up$logFC), color="red", size=1) + 
+    geom_point(data = padj.dn, aes(x=padj.dn$logCPM,y=padj.dn$logFC), color="blue", size=1) + 
+    labs(title=paste(un.group[1]," vs. ", un.group[i+1], ": pval < 0.01 & log2(FC) > log2(2)",sep=''))
+  print(p)
+}
+
+```
+
+
+#### Summary Table
+
+```{r, echo=TRUE}
+
+# Summary table
+df.summary.a <- do.call("rbind",df.summary.a.l)
+colnames(df.summary.a) <- c("DE up","min +log2FC","max +log2FC","DE down","min -log2FC","max -log2FC")
+rownames(df.summary.a) <- paste(un.group.a[1],".vs.", un.group.a[2:11], sep='')
+names(de.genes.a.l) <- paste(un.group.a[1],".vs.", un.group.a[2:11], sep='')
+
+datatable(df.summary.a, extensions = 'Buttons',
+          options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+# Get list of genes that are DE in at least 1 comparison
+de.genes.names.a <- do.call("c",lapply(de.genes.a.l, function(x){rownames(x)}))
+de.genes.names.a.u <- unique(de.genes.names.a)
+
+df.genes.a <- do.call("cbind",lapply(res.a, function(x){x[rownames(x) %in% de.genes.names.a.u,]}))
+
+
+colnames(df.genes.a)<-c(paste(un.group.a[1],".vs.", un.group.a[2],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.", un.group.a[3],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.", un.group.a[4],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.", un.group.a[5],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.", un.group.a[6],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.", un.group.a[7],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.",un.group.a[8],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.",un.group.a[9],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.",un.group.a[10],"_",colnames(df.genes.a)[1:4], sep=''),
+                        paste(un.group.a[1],".vs.",un.group.a[11],"_",colnames(df.genes.a)[1:4], sep=''))
+
+```
+
+### Compare time 0 to amputated
+
+* It appears that time point 0 is the proper control for this experiment
+* The tissue close to wounding site on the fin (right after amputation) is a better baseline than the Amputated tissue
+* This is illustrated by the very small difference between Amputated and time 9 (the regenerated tail)
+
+```{r}
+
+de.genes.0.l.2 <- lapply(de.genes.0.l, function(x) {x$gene_name <- rownames(x);return(x)})
+de.genes.a.l.2 <- lapply(de.genes.a.l, function(x) {x$gene_name <- rownames(x);return(x)})
+df_both <- Map(merge, de.genes.0.l.2, de.genes.a.l.2, by="gene_name")
+
+sum.t <- data.frame(time_0=sapply(de.genes.0.l.2, nrow), Amp=sapply(de.genes.a.l.2, nrow), 
+                    both=sapply(df_both, nrow))
+
+datatable(sum.t, extensions = 'Buttons',
+          options = list(dom = 'Bfrtip', buttons = c('copy', 'csv', 'excel', 'pdf', 'print')))
+
+```
+
+
+## maSigPro {.tabset .tabset-fade}
+
+* The maSigPro packages is specifically for time series data
+* Uses GLM 
+* Models gene expression by polynomial regression
+* Two regression steps:
+    + selects genes with non-flat profiles
+    + creates best regression models for each gene to identify specific time or series associated changes 
+* Used TMM normalized counts from EdgeR
+
+
+### 0dpa {.tabset .tabset-fade}
+
+* Set up design matrix 
+* Run regression steps
+
+```{r, echo=TRUE, results=FALSE}
+# using edgeR normalized counts pseudo.counts
+norm.counts <- z$pseudo.counts
+# Design matrix: time, replicates and 1 group
+ma.design <- data.frame(time=rep(c(0,3,6,14,c(1,2,3,4,7,18)*24),each=3), replicates = rep(c(1:10), each = 3),
+                        group=rep(1,30))
+rownames(ma.design) <- colnames(norm.counts)[c(1:3,7:33)]
+ma.design
+# make the design matrix
+design <- make.design.matrix(ma.design)
+# run p.vector: performs a regression fit for each gene taking all variables present in the model
+fit <- p.vector(data=norm.counts, design=design, Q=0.05, counts=T) # 0.05 = 10356, 0.01 = , 0.001 = 5728
+#saveRDS(fit,file="/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/fit_ftc_0dpa.RDS")
+#fit <- readRDS("/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/fit_ftc_0dpa.RDS")
+# Run T.fit selects the best regression model for each gene using stepwise regression
+tstep <- T.fit(fit)
+tstep.b2 <- T.fit(fit, step.method = "two.ways.backward")
+#saveRDS(tstep,file="/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/tstep_ftc_0dpa.RDS")
+#tstep <- readRDS("/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/tstep_ftc_0dpa.RDS")
+tstep$g # 5728
+sigs <- get.siggenes(tstep, rsq = 0.6, vars = "all") # all vs. each??
+sigs$sig.genes$g  # 985
+
+t.fit <- as.data.frame(fit$dat)
+t.fit$genes <- rownames(t.fit)
+t.step <- as.data.frame(tstep$dat)
+t.step$genes <- rownames(t.step)
+t <- sigs$sig.genes$sig.profiles
+t$genes <- rownames(t)
+
+```
+
+#### Replicates {.tabset .tabset-fade}
+
+```{r}
+# Read in RPKMs
+fin_tc_rpkm_filtered <- read.csv(here("results","tables","fin_tc_rpkm_filtered.csv"))
+fin_tc_rpkm_filtered <- fin_tc_rpkm_filtered[,c(1:4,8:34)]
+colnames(fin_tc_rpkm_filtered) <- c("X", colnames(counts.a)[4:33])
+fin_tc_rpkm_filtered.log2 <- log2(fin_tc_rpkm_filtered[,2:31]+0.1) # log2 transform and add 1 so no 0
+rownames(fin_tc_rpkm_filtered.log2) <- fin_tc_rpkm_filtered$X
+# get significant genes
+sig.log2fpkm <- fin_tc_rpkm_filtered.log2[match(rownames(sigs$sig.genes$sig.profiles),rownames(fin_tc_rpkm_filtered.log2)),]
+# use Mfuzz to get clusters
+da <- as.matrix(sig.log2fpkm) # rename
+dat <- ExpressionSet(da) # convert to expression set
+dat <- fill.NA(dat, mode="mean")
+dat.s <- standardise(dat) # standarize, average is 0 w/ SDs
+m1 <- mestimate(dat.s)
+
+```
+
+* Compare different number of clusters
+
+##### 8
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl <- mfuzz(dat.s,c=8,m=m1)
+mfuzz.plot2(dat.s,cl=cl,mfrow=c(4,2),time.labels=colnames(da),x11=F,las=2,single=F,colo="fancy",min.mem=0,
+            ylab="log2FPKM",centre=T)
+```
+
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters <- cl$cluster
+clusters <- data.frame(cbind(names(clusters),as.numeric(cl$cluster)))
+colnames(clusters) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters$V1[clusters$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls <- lapply(1:8,cluster.mean,da)
+names(wt.meanls) <- paste0("cluster_",1:8)
+wt.reps <- do.call(rbind,wt.meanls)
+# Now plot
+
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.reps, cluster_cols = FALSE)
+
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.reps, cluster_cols = TRUE)
+
+```
+
+
+##### 16
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl <- mfuzz(dat.s,c=16,m=m1)
+mfuzz.plot2(dat.s,cl=cl,mfrow=c(4,4),time.labels=colnames(da),x11=F,las=2,single=F,colo="fancy",min.mem=0,
+            ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters <- cl$cluster
+clusters <- data.frame(cbind(names(clusters),as.numeric(cl$cluster)))
+colnames(clusters) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters$V1[clusters$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls <- lapply(1:16,cluster.mean,da)
+names(wt.meanls) <- paste0("cluster_",1:16)
+wt.reps <- do.call(rbind,wt.meanls)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.reps, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.reps, cluster_cols = TRUE)
+
+```
+
+#### Mean {.tabset .tabset-fade}
+
+```{r}
+# Read in RPKMs
+fin_tc_rpkm_filtered <- read.csv(here("results","tables","fin_tc_rpkm_filtered.csv"))
+fin_tc_rpkm_filtered <- fin_tc_rpkm_filtered[,c(1:4,8:34)]
+colnames(fin_tc_rpkm_filtered) <- c("X", colnames(counts.a)[4:33])
+fin_tc_rpkm_filtered.log2 <- log2(fin_tc_rpkm_filtered[,2:31]+0.1) # log2 transform and add 1 so no 0
+rownames(fin_tc_rpkm_filtered.log2) <- fin_tc_rpkm_filtered$X
+# mean of every 3 columns
+n <- 1:ncol(fin_tc_rpkm_filtered.log2)
+ind <- data.frame(matrix(c(n, rep(NA, 3 - ncol(fin_tc_rpkm_filtered.log2)%%3)), byrow=F, nrow=3))
+nonna <- sapply(ind, function(x) all(!is.na(x)))
+ind <- ind[, nonna]
+fin_tc_rpkm_filtered.log2.mean <- do.call(cbind, lapply(ind, function(i)rowMeans(fin_tc_rpkm_filtered.log2[, i])))
+colnames(fin_tc_rpkm_filtered.log2.mean) <- c("mean.0dpa", "mean.3hpa", "mean.6hpa", "mean.14hpa", "mean.1dpa",
+                                              "mean.2dpa", "mean.3dpa", "mean.4dpa", "mean.7dpa", "mean.18dpa")
+# get significant genes
+sig.log2fpkm.mean <- fin_tc_rpkm_filtered.log2.mean[match(rownames(sigs$sig.genes$sig.profiles),rownames(fin_tc_rpkm_filtered.log2.mean)),]
+# use Mfuzz to get clusters
+da.mean <- as.matrix(sig.log2fpkm.mean) # rename
+dat.mean <- ExpressionSet(da.mean) # convert to expression set
+#da.meant <- fill.NA(dat.mean, mode="knn")
+dat.s.mean <- standardise(dat.mean) # standarize, average is 0 w/ SDs
+m1.mean <- mestimate(dat.s.mean)
+
+```
+
+##### 8
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl.mean <- mfuzz(dat.s.mean,c=8,m=m1.mean)
+mfuzz.plot2(dat.s.mean,cl=cl.mean,mfrow=c(4,2),time.labels=colnames(da.mean),x11=F,las=2,single=F,
+            colo="fancy",min.mem=0,ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters.mean <- cl.mean$cluster
+clusters.mean <- data.frame(cbind(names(clusters.mean),as.numeric(cl.mean$cluster)))
+colnames(clusters.mean) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters.mean$V1[clusters.mean$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls.mean <- lapply(1:8,cluster.mean,da.mean)
+names(wt.meanls.mean) <- paste0("cluster_",1:8)
+wt.mean <- do.call(rbind,wt.meanls.mean)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.mean, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.mean, cluster_cols = TRUE)
+
+```
+
+
+##### 16
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl.mean <- mfuzz(dat.s.mean,c=16,m=m1.mean)
+mfuzz.plot2(dat.s.mean,cl=cl.mean,mfrow=c(4,4),time.labels=colnames(da.mean),x11=F,las=2,single=F,
+            colo="fancy",min.mem=0,ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters.mean <- cl.mean$cluster
+clusters.mean <- data.frame(cbind(names(clusters.mean),as.numeric(cl.mean$cluster)))
+colnames(clusters.mean) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters.mean$V1[clusters.mean$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls.mean <- lapply(1:16,cluster.mean,da.mean)
+names(wt.meanls.mean) <- paste0("cluster_",1:16)
+wt.mean <- do.call(rbind,wt.meanls.mean)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.mean, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.mean, cluster_cols = TRUE)
+
+```
+
+### Amputated {.tabset .tabset-fade}
+
+```{r, echo=T, results=FALSE}
+# using edgeR normalized counts pseudo.counts
+norm.counts <- z.a$pseudo.counts
+# Design matrix: time, replicates and 1 group
+ma.design <- data.frame(time=rep(c(0,3,6,14,c(1,2,3,4,7,18)*24),each=3), replicates = rep(c(1:10), each = 3),
+                        group=rep(1,30))
+rownames(ma.design) <- colnames(norm.counts)[c(1:3,7:33)]
+ma.design
+# make the design matrix
+design <- make.design.matrix(ma.design)
+# run p.vector: performs a regression fit for each gene taking all variables present in the model
+#fit <- p.vector(data=norm.counts, design=design, Q=0.001, counts=T) # 0.05 = , 0.01 = , 0.001 = 5728
+#saveRDS(fit,file="/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/fit_ftc_amp.RDS")
+fit <- readRDS(here("data","rdata","fit_ftc_amp.RDS"))
+# Run T.fit selects the best regression model for each gene using stepwise regression
+#tstep <- T.fit(fit)
+#saveRDS(tstep,file="/home/wew/Nothobranchius_furzeri/dag.analysis/wew3/data/rdata/tstep_ftc_amp.RDS")
+tstep <- readRDS(here("data","rdata","tstep_ftc_amp.RDS"))
+tstep$g # 4360
+sigs <- get.siggenes(tstep, rsq = 0.6, vars = "all") # all vs. each??
+sigs$sig.genes$g  # 690
+
+```
+
+#### Replicates {.tabset .tabset-fade}
+
+```{r}
+# Read in RPKMs
+fin_tc_rpkm_filtered <- read.csv(here("results","tables","fin_tc_rpkm_filtered.csv"))
+fin_tc_rpkm_filtered <- fin_tc_rpkm_filtered[,c(1,5:34)]
+colnames(fin_tc_rpkm_filtered) <- c("X", colnames(counts.a)[c(1:3,7:33)])
+fin_tc_rpkm_filtered.log2 <- log2(fin_tc_rpkm_filtered[,2:31]+0.1) # log2 transform and add 1 so no 0
+rownames(fin_tc_rpkm_filtered.log2) <- fin_tc_rpkm_filtered$X
+# get significant genes
+sig.log2fpkm <- fin_tc_rpkm_filtered.log2[match(rownames(sigs$sig.genes$sig.profiles),rownames(fin_tc_rpkm_filtered.log2)),]
+# use Mfuzz to get clusters
+da <- as.matrix(sig.log2fpkm) # rename
+dat <- ExpressionSet(da) # convert to expression set
+dat <- fill.NA(dat, mode="mean")
+dat.s <- standardise(dat) # standarize, average is 0 w/ SDs
+m1 <- mestimate(dat.s)
+
+```
+
+* Compare different number of clusters
+
+##### 8
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl <- mfuzz(dat.s,c=8,m=m1)
+mfuzz.plot2(dat.s,cl=cl,mfrow=c(4,2),time.labels=colnames(da),x11=F,las=2,single=F,colo="fancy",min.mem=0,
+            ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters <- cl$cluster
+clusters <- data.frame(cbind(names(clusters),as.numeric(cl$cluster)))
+colnames(clusters) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters$V1[clusters$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls <- lapply(1:8,cluster.mean,da)
+names(wt.meanls) <- paste0("cluster_",1:8)
+wt.reps <- do.call(rbind,wt.meanls)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.reps, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.reps, cluster_cols = TRUE)
+
+
+```
+
+
+##### 16
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl <- mfuzz(dat.s,c=16,m=m1)
+mfuzz.plot2(dat.s,cl=cl,mfrow=c(4,4),time.labels=colnames(da),x11=F,las=2,single=F,colo="fancy",min.mem=0,
+            ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters <- cl$cluster
+clusters <- data.frame(cbind(names(clusters),as.numeric(cl$cluster)))
+colnames(clusters) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters$V1[clusters$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls <- lapply(1:16,cluster.mean,da)
+names(wt.meanls) <- paste0("cluster_",1:16)
+wt.reps <- do.call(rbind,wt.meanls)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.reps, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.reps, cluster_cols = TRUE)
+
+```
+
+#### Mean {.tabset .tabset-fade}
+
+```{r}
+# Read in RPKMs
+fin_tc_rpkm_filtered <- read.csv(here("results","tables","fin_tc_rpkm_filtered.csv"))
+fin_tc_rpkm_filtered <- fin_tc_rpkm_filtered[,c(1,5:34)]
+colnames(fin_tc_rpkm_filtered) <- c("X", colnames(counts.a)[c(1:3,7:33)])
+fin_tc_rpkm_filtered.log2 <- log2(fin_tc_rpkm_filtered[,2:31]+0.1) # log2 transform and add 1 so no 0
+rownames(fin_tc_rpkm_filtered.log2) <- fin_tc_rpkm_filtered$X
+# mean of every 3 columns
+n <- 1:ncol(fin_tc_rpkm_filtered.log2)
+ind <- data.frame(matrix(c(n, rep(NA, 3 - ncol(fin_tc_rpkm_filtered.log2)%%3)), byrow=F, nrow=3))
+nonna <- sapply(ind, function(x) all(!is.na(x)))
+ind <- ind[, nonna]
+fin_tc_rpkm_filtered.log2.mean <- do.call(cbind, lapply(ind, function(i)rowMeans(fin_tc_rpkm_filtered.log2[, i])))
+colnames(fin_tc_rpkm_filtered.log2.mean) <- c("mean.Amp", "mean.3hpa", "mean.6hpa", "mean.14hpa", "mean.1dpa",
+                                              "mean.2dpa", "mean.3dpa", "mean.4dpa", "mean.7dpa", "mean.18dpa")
+# get significant genes
+sig.log2fpkm.mean <- fin_tc_rpkm_filtered.log2.mean[match(rownames(sigs$sig.genes$sig.profiles),rownames(fin_tc_rpkm_filtered.log2.mean)),]
+# use Mfuzz to get clusters
+da.mean <- as.matrix(sig.log2fpkm.mean) # rename
+dat.mean <- ExpressionSet(da.mean) # convert to expression set
+#da.meant <- fill.NA(dat.mean, mode="knn")
+dat.s.mean <- standardise(dat.mean) # standarize, average is 0 w/ SDs
+m1.mean <- mestimate(dat.s.mean)
+
+```
+
+##### 8
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl.mean <- mfuzz(dat.s.mean,c=8,m=m1.mean)
+mfuzz.plot2(dat.s.mean,cl=cl.mean,mfrow=c(4,2),time.labels=colnames(da.mean),x11=F,las=2,single=F,
+            colo="fancy",min.mem=0,ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters.mean <- cl.mean$cluster
+clusters.mean <- data.frame(cbind(names(clusters.mean),as.numeric(cl.mean$cluster)))
+colnames(clusters.mean) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters.mean$V1[clusters.mean$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls.mean <- lapply(1:8,cluster.mean,da.mean)
+names(wt.meanls.mean) <- paste0("cluster_",1:8)
+wt.mean <- do.call(rbind,wt.meanls.mean)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.mean, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.mean, cluster_cols = TRUE)
+```
+
+
+##### 16
+
+```{r, fig.height=10, fig.width=8}
+# soft clustering,  fuzzy c-means algorithm
+cl.mean <- mfuzz(dat.s.mean,c=16,m=m1.mean)
+mfuzz.plot2(dat.s.mean,cl=cl.mean,mfrow=c(4,4),time.labels=colnames(da.mean),x11=F,las=2,single=F,
+            colo="fancy",min.mem=0,ylab="log2FPKM",centre=T)
+```
+
+```{r, echo=TRUE, results='asis', fig.show='asis'}
+# plot clusters in a heat map
+clusters.mean <- cl.mean$cluster
+clusters.mean <- data.frame(cbind(names(clusters.mean),as.numeric(cl.mean$cluster)))
+colnames(clusters.mean) <- c("V1","V2")
+# get mean of the genes in the clusters 
+cluster.mean=function(n,da)
+{
+  gn=da[rownames(da) %in% clusters.mean$V1[clusters.mean$V2==n],]
+  #print(head(gn))
+  gn.scale=apply(gn,1,scale)
+  #print(head(gn.scale))
+  gn.mean=apply(gn.scale,1,mean)
+  #print(head(gn.mean))
+  names(gn.mean)=colnames(gn)
+  gn.mean
+}
+
+wt.meanls.mean <- lapply(1:16,cluster.mean,da.mean)
+names(wt.meanls.mean) <- paste0("cluster_",1:16)
+wt.mean <- do.call(rbind,wt.meanls.mean)
+# Now plot
+cat("\n\n")
+pandoc.header("Cluster by row", level=6)
+pheatmap(wt.mean, cluster_cols = FALSE)
+cat("\n\n")
+pandoc.header("Cluster by row and column", level=6)
+pheatmap(wt.mean, cluster_cols = TRUE)
+
+```
+
+
+
+
+# R-session Information
+
+```{r session.info, echo=FALSE}
+capture.output(sessionInfo())
+
+```
+
